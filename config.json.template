@@ -1,0 +1,10 @@
+{
+  "providers": {
+    "minimax": {
+      "token": "PUT-YOUR-MiniMax-API-KEY-HERE"
+    },
+    "deepseek": {
+      "token": "PUT-YOUR-DeepSeek-API-KEY-HERE"
+    }
+  }
+}
