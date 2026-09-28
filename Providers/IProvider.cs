@@ -33,6 +33,7 @@ internal static class ProviderRegistry
     {
         new Minimax.MinimaxProvider(),
         new DeepSeek.DeepSeekProvider(),
+        new Glm.GlmProvider(),
     };
 
     private static readonly Dictionary<string, IProvider> ByName =

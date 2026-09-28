@@ -20,6 +20,16 @@ internal static class Program
 
         var parsed = ArgParser.Parse(args);
 
+        if (parsed.SelfTest)
+        {
+            Console.WriteLine("GLM 解析自检");
+            Console.WriteLine("============");
+            var fails = Providers.Glm.GlmUsageTests.Run();
+            Console.WriteLine();
+            Console.WriteLine(fails == 0 ? "全部通过 ✓" : $"失败 {fails} 项");
+            return fails == 0 ? ExitCode.Success : ExitCode.ApiError;
+        }
+
         if (parsed.ShowHelp)
         {
             Console.WriteLine(Usage.Get());
@@ -102,6 +112,7 @@ internal static class Program
         SubcommandKind.All => ProviderRegistry.KnownNames().Select(n => ProviderRegistry.TryGet(n)!).ToList(),
         SubcommandKind.Minimax => new() { ProviderRegistry.TryGet("minimax")! },
         SubcommandKind.DeepSeek => new() { ProviderRegistry.TryGet("deepseek")! },
+        SubcommandKind.Glm => new() { ProviderRegistry.TryGet("glm")! },
         _ => new()
     };
 
@@ -143,6 +154,7 @@ internal enum SubcommandKind
     All,
     Minimax,
     DeepSeek,
+    Glm,
 }
 
 internal sealed class ParsedArgs
@@ -153,6 +165,7 @@ internal sealed class ParsedArgs
     public Dictionary<string, string> ConfigTokens { get; init; } = new(StringComparer.Ordinal);
     public bool ShowHelp { get; init; }
     public bool ShowVersion { get; init; }
+    public bool SelfTest { get; init; }
 }
 
 internal static class ArgParser
@@ -164,6 +177,7 @@ internal static class ArgParser
         string? tokenOverride = null;
         bool showHelp = false;
         bool showVersion = false;
+        bool selfTest = false;
 
         for (int i = 0; i < args.Length; i++)
         {
@@ -176,6 +190,11 @@ internal static class ArgParser
             if (a == "--version" || a == "-v")
             {
                 showVersion = true;
+                continue;
+            }
+            if (a == "--self-test")
+            {
+                selfTest = true;
                 continue;
             }
             if (a == "--token")
@@ -200,6 +219,7 @@ internal static class ArgParser
             {
                 case "minimax": subcommand = SubcommandKind.Minimax; break;
                 case "deepseek": subcommand = SubcommandKind.DeepSeek; break;
+                case "glm": subcommand = SubcommandKind.Glm; break;
                 case "all": subcommand = SubcommandKind.All; break;
                 default: unknownSubcommand ??= a; break;
             }
@@ -208,7 +228,7 @@ internal static class ArgParser
         var exeDir = AppContext.BaseDirectory;
         var configResult = ConfigLoader.Load(exeDir);
 
-        if (!showHelp && !showVersion && configResult.Error is not null)
+        if (!showHelp && !showVersion && !selfTest && configResult.Error is not null)
         {
             Console.Error.WriteLine($"错误: {configResult.Error}");
             if (!string.IsNullOrEmpty(configResult.Detail))
@@ -226,6 +246,7 @@ internal static class ArgParser
             ConfigTokens = configResult.Tokens,
             ShowHelp = showHelp,
             ShowVersion = showVersion,
+            SelfTest = selfTest,
         };
     }
 }
@@ -241,6 +262,7 @@ internal static class Usage
           TokenUsage.exe all                    并行查询所有已配置的 provider
           TokenUsage.exe minimax                只查询 minimax
           TokenUsage.exe deepseek               只查询 deepseek
+          TokenUsage.exe glm                    只查询 GLM Token Plan（智谱 BigModel）
           TokenUsage.exe <provider> --token X   CLI 覆盖 token（all 模式不支持）
 
         选项:
@@ -248,12 +270,14 @@ internal static class Usage
           --token=<value>     同上，等号形式
           --help, -h          显示本帮助
           --version, -v       显示版本
+          --self-test         运行 GLM 解析逻辑离线自检
 
         配置文件: <exe-dir>/config.json
           {
             "providers": {
               "minimax":  { "token": "..." },
-              "deepseek": { "token": "..." }
+              "deepseek": { "token": "..." },
+              "glm":      { "token": "..." }
             }
           }
 

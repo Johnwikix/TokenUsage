@@ -5,6 +5,9 @@
     },
     "deepseek": {
       "token": "PUT-YOUR-DeepSeek-API-KEY-HERE"
+    },
+    "glm": {
+      "token": "PUT-YOUR-GLM-API-KEY-HERE"
     }
   }
 }
