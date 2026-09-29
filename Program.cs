@@ -38,7 +38,7 @@ internal static class Program
 
         if (parsed.ShowVersion)
         {
-            Console.WriteLine($"TokenUsage {Usage.GetVersion()}");
+            Console.WriteLine($"aiusage {Usage.GetVersion()}");
             return ExitCode.Success;
         }
 
@@ -255,15 +255,15 @@ internal static class Usage
 {
     public static string Get() =>
         """
-        TokenUsage — 统一查询 AI 平台的 token plan / 余额
+        aiusage — 统一查询 AI 平台的 token plan / 余额
 
         用法:
-          TokenUsage.exe                        等价 all
-          TokenUsage.exe all                    并行查询所有已配置的 provider
-          TokenUsage.exe minimax                只查询 minimax
-          TokenUsage.exe deepseek               只查询 deepseek
-          TokenUsage.exe glm                    只查询 GLM Token Plan（智谱 BigModel）
-          TokenUsage.exe <provider> --token X   CLI 覆盖 token（all 模式不支持）
+          aiusage                        等价 all
+          aiusage all                    并行查询所有已配置的 provider
+          aiusage minimax                只查询 minimax
+          aiusage deepseek               只查询 deepseek
+          aiusage glm                    只查询 GLM Token Plan（智谱 BigModel）
+          aiusage <provider> --token X   CLI 覆盖 token（all 模式不支持）
 
         选项:
           --token <value>     覆盖 config.json 中的 token（仅单 provider 子命令）
