@@ -1,30 +1,49 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using TokenUsage.Errors;
 
 namespace TokenUsage.Config;
 
+internal sealed class ConfigRoot
+{
+    [JsonPropertyName("providers")]
+    public Dictionary<string, ProviderConfig?>? Providers { get; set; }
+}
+
+internal sealed class ProviderConfig
+{
+    [JsonPropertyName("token")]
+    public string? Token { get; set; }
+
+    /// <summary>"cn"（默认）或 "global"/"intl"；用于区分国内/国际站点。</summary>
+    [JsonPropertyName("region")]
+    public string? Region { get; set; }
+
+    /// <summary>Codex (ChatGPT 订阅) 的 chatgpt-account-id，可选。</summary>
+    [JsonPropertyName("accountId")]
+    public string? AccountId { get; set; }
+
+    /// <summary>可选的自定义端点基址（代理 / 兼容网关）。</summary>
+    [JsonPropertyName("baseUrl")]
+    public string? BaseUrl { get; set; }
+
+    [JsonIgnore]
+    public bool IsConfigured => !string.IsNullOrWhiteSpace(Token);
+
+    public string EffectiveRegion =>
+        string.IsNullOrWhiteSpace(Region) ? "cn" : Region.Trim().ToLowerInvariant();
+
+    public bool IsGlobalRegion => EffectiveRegion is "global" or "intl" or "international" or "us";
+}
+
+internal sealed class LoadResult
+{
+    public Dictionary<string, ProviderConfig> Providers { get; init; } = new(StringComparer.OrdinalIgnoreCase);
+    public string? Error { get; init; }
+    public string? Detail { get; init; }
+}
+
 internal static partial class ConfigLoader
 {
-    public sealed class Root
-    {
-        [JsonPropertyName("providers")]
-        public Dictionary<string, ProviderConfig>? Providers { get; set; }
-    }
-
-    public sealed class ProviderConfig
-    {
-        [JsonPropertyName("token")]
-        public string? Token { get; set; }
-    }
-
-    public sealed class LoadResult
-    {
-        public Dictionary<string, string> Tokens { get; init; } = new(StringComparer.Ordinal);
-        public string? Error { get; init; }
-        public string? Detail { get; init; }
-    }
-
     public static LoadResult Load(string exeDir)
     {
         var configPath = Path.Combine(exeDir, "config.json");
@@ -52,10 +71,10 @@ internal static partial class ConfigLoader
             };
         }
 
-        Root? parsed;
+        ConfigRoot? parsed;
         try
         {
-            parsed = JsonSerializer.Deserialize(json, ConfigJsonContext.Default.Root);
+            parsed = JsonSerializer.Deserialize(json, ConfigJsonContext.Default.ConfigRoot);
         }
         catch (JsonException ex)
         {
@@ -66,36 +85,29 @@ internal static partial class ConfigLoader
             };
         }
 
-        if (parsed is null || parsed.Providers is null || parsed.Providers.Count == 0)
+        if (parsed?.Providers is null || parsed.Providers.Count == 0)
         {
             return new LoadResult
             {
-                Error = "config.json 缺少 providers 配置或所有 provider 都为空",
-                Detail = $"路径: {configPath}；新 schema 仅支持嵌套 providers.<name>.token 格式（不再兼容旧的顶层 token 字段）"
+                Error = "config.json 缺少 providers 配置",
+                Detail = $"路径: {configPath}；请使用 providers.<name>.token 格式（参考 config.json.template）"
             };
         }
 
-        var tokens = new Dictionary<string, string>(StringComparer.Ordinal);
+        var providers = new Dictionary<string, ProviderConfig>(StringComparer.OrdinalIgnoreCase);
         foreach (var (name, cfg) in parsed.Providers)
         {
-            if (cfg is null) continue;
-            if (string.IsNullOrWhiteSpace(cfg.Token)) continue;
-            tokens[name] = cfg.Token.Trim();
+            if (cfg is null || !cfg.IsConfigured) continue;
+            cfg.Token = cfg.Token!.Trim();
+            providers[name] = cfg;
         }
 
-        if (tokens.Count == 0)
-        {
-            return new LoadResult
-            {
-                Error = "config.json 中所有 provider 的 token 字段都为空",
-                Detail = $"路径: {configPath}"
-            };
-        }
-
-        return new LoadResult { Tokens = tokens };
+        // all 模式下未配置的 provider 会被跳过，因此这里不把“全部为空”当成读取失败：
+        // 单 provider 子命令或 --token 覆盖仍可正常工作。
+        return new LoadResult { Providers = providers };
     }
 
-    [JsonSerializable(typeof(Root))]
+    [JsonSerializable(typeof(ConfigRoot))]
     internal partial class ConfigJsonContext : JsonSerializerContext
     {
     }

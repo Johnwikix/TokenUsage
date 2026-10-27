@@ -1,13 +1,40 @@
 {
   "providers": {
-    "minimax": {
-      "token": "PUT-YOUR-MiniMax-API-KEY-HERE"
-    },
-    "deepseek": {
-      "token": "PUT-YOUR-DeepSeek-API-KEY-HERE"
+    "kimi": {
+      "token": "",
+      "region": "cn"
     },
     "glm": {
-      "token": "PUT-YOUR-GLM-API-KEY-HERE"
+      "token": "",
+      "region": "cn"
+    },
+    "minimax": {
+      "token": "",
+      "region": "cn"
+    },
+    "opencode": {
+      "token": ""
+    },
+    "codex": {
+      "token": "",
+      "accountId": ""
+    },
+    "deepseek": {
+      "token": ""
+    },
+    "moonshot": {
+      "token": "",
+      "region": "cn"
+    },
+    "openrouter": {
+      "token": ""
+    },
+    "siliconflow": {
+      "token": "",
+      "region": "cn"
+    },
+    "zenmux": {
+      "token": ""
     }
   }
 }

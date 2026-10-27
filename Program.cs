@@ -18,236 +18,258 @@ internal static class Program
         {
         }
 
-        var parsed = ArgParser.Parse(args);
+        var options = CommandLine.Parse(args);
 
-        if (parsed.SelfTest)
-        {
-            Console.WriteLine("GLM 解析自检");
-            Console.WriteLine("============");
-            var fails = Providers.Glm.GlmUsageTests.Run();
-            Console.WriteLine();
-            Console.WriteLine(fails == 0 ? "全部通过 ✓" : $"失败 {fails} 项");
-            return fails == 0 ? ExitCode.Success : ExitCode.ApiError;
-        }
-
-        if (parsed.ShowHelp)
+        if (options.ShowHelp)
         {
             Console.WriteLine(Usage.Get());
             return ExitCode.Success;
         }
 
-        if (parsed.ShowVersion)
+        if (options.ShowVersion)
         {
             Console.WriteLine($"aiusage {Usage.GetVersion()}");
             return ExitCode.Success;
         }
 
-        if (parsed.UnknownSubcommand is { } unknown)
+        if (options.SelfTest)
         {
-            await Console.Error.WriteLineAsync($"错误: 未知子命令: {unknown}");
-            await Console.Error.WriteLineAsync($"可用: {string.Join(" / ", ProviderRegistry.KnownNames())} / all");
+            return SelfTests.RunAll() == 0 ? ExitCode.Success : ExitCode.ApiError;
+        }
+
+        if (options.Error is { } argumentError)
+        {
+            await Console.Error.WriteLineAsync($"错误: {argumentError}");
+            await Console.Error.WriteLineAsync("使用 --help 查看用法");
             return ExitCode.ConfigError;
         }
 
-        var selectedProviders = ResolveProviders(parsed.Subcommand);
-        if (selectedProviders.Count == 0)
+        var selected = options.Selected;
+        foreach (var name in selected)
         {
-            await Console.Error.WriteLineAsync($"错误: 子命令 '{parsed.Subcommand}' 解析后无可用 provider");
-            return ExitCode.ConfigError;
-        }
-
-        if (parsed.Subcommand == SubcommandKind.All && parsed.TokenOverride is not null)
-        {
-            await Console.Error.WriteLineAsync("错误: all 子命令不支持 --token 覆盖（请使用 minimax / deepseek 子命令）");
-            return ExitCode.ConfigError;
-        }
-
-        if (selectedProviders.Count == 1 && parsed.TokenOverride is null && parsed.Subcommand != SubcommandKind.All)
-        {
-            var single = selectedProviders[0];
-            if (!parsed.ConfigTokens.TryGetValue(single.Name, out _))
+            if (ProviderRegistry.TryGet(name) is null)
             {
-                await Console.Error.WriteLineAsync($"错误: {single.Name} 未配置（请在 config.json 的 providers.{single.Name}.token 写入 token，或使用 {single.Name} --token <value>）");
+                await Console.Error.WriteLineAsync($"错误: 未知 provider: {name}");
+                await Console.Error.WriteLineAsync($"可用: {string.Join(" / ", ProviderRegistry.KnownNames())} / all");
                 return ExitCode.ConfigError;
             }
         }
 
-        if (parsed.Subcommand == SubcommandKind.All && parsed.ConfigTokens.Count == 0)
+        var explicitSelection = selected.Count > 0;
+        var names = explicitSelection ? selected : ProviderRegistry.KnownNames();
+
+        if (options.TokenOverride is not null && names.Count != 1)
         {
-            await Console.Error.WriteLineAsync("错误: 无任何 provider 配置（请在 config.json 的 providers.<name>.token 写入 token）");
+            await Console.Error.WriteLineAsync("错误: --token 只能与单个 provider 子命令一起使用");
             return ExitCode.ConfigError;
         }
 
-        if (selectedProviders.Count > 1)
+        var loaded = ConfigLoader.Load(AppContext.BaseDirectory);
+        var work = new List<WorkItem>();
+
+        foreach (var name in names)
         {
-            var missing = selectedProviders.Where(p => !parsed.ConfigTokens.ContainsKey(p.Name)).Select(p => p.Name).ToArray();
-            if (missing.Length > 0)
+            var provider = ProviderRegistry.TryGet(name);
+            if (provider is null) continue;
+
+            var configured = loaded.Providers.TryGetValue(name, out var config) ? config : null;
+
+            var effective = new ProviderConfig
             {
-                await Console.Error.WriteLineAsync($"错误: all 模式下未配置的 provider: {string.Join(", ", missing)}（已自动跳过）");
-            }
-            selectedProviders = selectedProviders.Where(p => parsed.ConfigTokens.ContainsKey(p.Name)).ToList();
-            if (selectedProviders.Count == 0)
+                Token = options.TokenOverride ?? configured?.Token,
+                Region = options.Region ?? configured?.Region,
+                AccountId = configured?.AccountId,
+                BaseUrl = options.BaseUrl ?? configured?.BaseUrl,
+            };
+            provider.ApplyAmbientCredentials(effective);
+
+            if (!effective.IsConfigured)
             {
-                await Console.Error.WriteLineAsync("错误: all 模式下无可用 provider（全部未配置）");
-                return ExitCode.ConfigError;
+                if (explicitSelection)
+                {
+                    await Console.Error.WriteLineAsync(name == "codex"
+                        ? "错误: codex 未登录：请先运行 codex login（工具会自动读取 %USERPROFILE%\\.codex\\auth.json），或在 config.json 的 providers.codex.token 指定 access token"
+                        : loaded.Error is { } loadError
+                            ? $"错误: {loadError}"
+                            : $"错误: {name} 未配置（请在 config.json 的 providers.{name}.token 写入 token，或使用 {name} --token <value>）");
+                    if (name != "codex" && loaded.Error is not null && !string.IsNullOrWhiteSpace(loaded.Detail))
+                    {
+                        await Console.Error.WriteLineAsync(loaded.Detail);
+                    }
+                    return ExitCode.ConfigError;
+                }
+                continue;
             }
+
+            work.Add(new WorkItem(provider, effective));
         }
 
-        var tasks = selectedProviders.Select(p => RunOneAsync(p, parsed.TokenOverride, parsed.ConfigTokens)).ToArray();
-        var results = await Task.WhenAll(tasks);
+        if (work.Count == 0)
+        {
+            await Console.Error.WriteLineAsync(loaded.Error is { } loadError
+                ? $"错误: {loadError}"
+                : $"错误: 没有任何可查询的 provider（请在 config.json 的 providers.<name>.token 写入 token）");
+            if (loaded.Error is null && !string.IsNullOrWhiteSpace(loaded.Detail))
+            {
+                await Console.Error.WriteLineAsync(loaded.Detail);
+            }
+            return ExitCode.ConfigError;
+        }
+
+        var results = await Task.WhenAll(work.Select(RunAsync));
 
         var exitCode = ExitCode.Success;
-        foreach (var r in results)
+        foreach (var result in results)
         {
             Console.WriteLine();
-            Console.Write(r.Output);
-            if (r.ExitCode > exitCode) exitCode = r.ExitCode;
+            Console.Write(result.Output);
+            if (result.ExitCode > exitCode) exitCode = result.ExitCode;
         }
+        Console.WriteLine();
 
         return exitCode;
     }
 
-    private static List<IProvider> ResolveProviders(SubcommandKind kind) => kind switch
+    private static async Task<RunResult> RunAsync(WorkItem item)
     {
-        SubcommandKind.All => ProviderRegistry.KnownNames().Select(n => ProviderRegistry.TryGet(n)!).ToList(),
-        SubcommandKind.Minimax => new() { ProviderRegistry.TryGet("minimax")! },
-        SubcommandKind.DeepSeek => new() { ProviderRegistry.TryGet("deepseek")! },
-        SubcommandKind.Glm => new() { ProviderRegistry.TryGet("glm")! },
-        _ => new()
-    };
-
-    private static async Task<RunResult> RunOneAsync(IProvider provider, string? tokenOverride, IReadOnlyDictionary<string, string> configTokens)
-    {
-        var token = tokenOverride ?? configTokens[provider.Name];
         try
         {
-            var output = await provider.FetchAndRenderAsync(token, CancellationToken.None);
-            return new RunResult { Output = output, ExitCode = ExitCode.Success };
+            var output = await item.Provider.FetchAndRenderAsync(item.Config, CancellationToken.None);
+            return new RunResult(output, ExitCode.Success);
         }
         catch (ProviderException ex) when (ex.Kind is ProviderExceptionKind.Unauthorized or ProviderExceptionKind.ApiError)
         {
-            return new RunResult
-            {
-                Output = $"[{provider.Name}] 错误: {ex.Message}",
-                ExitCode = ExitCode.ApiError
-            };
+            return new RunResult(ErrorBlock(item.Provider, ex.Message), ExitCode.ApiError);
         }
         catch (ProviderException ex) when (ex.Kind is ProviderExceptionKind.Timeout or ProviderExceptionKind.Network)
         {
-            return new RunResult
-            {
-                Output = $"[{provider.Name}] 错误: {ex.Message}",
-                ExitCode = ExitCode.NetworkError
-            };
+            return new RunResult(ErrorBlock(item.Provider, ex.Message), ExitCode.NetworkError);
+        }
+        catch (Exception ex)
+        {
+            return new RunResult(ErrorBlock(item.Provider, $"未处理的异常: {ex.Message}"), ExitCode.ApiError);
         }
     }
 
-    private sealed class RunResult
-    {
-        public string Output { get; init; } = string.Empty;
-        public int ExitCode { get; init; }
-    }
-}
+    private static string ErrorBlock(IProvider provider, string message) =>
+        $"{provider.DisplayTitle}{Environment.NewLine}错误: {message}";
 
-internal enum SubcommandKind
-{
-    All,
-    Minimax,
-    DeepSeek,
-    Glm,
+    private sealed record WorkItem(IProvider Provider, ProviderConfig Config);
+
+    private sealed record RunResult(string Output, int ExitCode);
 }
 
 internal sealed class ParsedArgs
 {
-    public SubcommandKind Subcommand { get; init; } = SubcommandKind.All;
-    public string? UnknownSubcommand { get; init; }
+    public List<string> Selected { get; init; } = new();
     public string? TokenOverride { get; init; }
-    public Dictionary<string, string> ConfigTokens { get; init; } = new(StringComparer.Ordinal);
+    public string? Region { get; init; }
+    public string? BaseUrl { get; init; }
+    public string? Error { get; init; }
     public bool ShowHelp { get; init; }
     public bool ShowVersion { get; init; }
     public bool SelfTest { get; init; }
 }
 
-internal static class ArgParser
+internal static class CommandLine
 {
+    private static readonly Dictionary<string, string> Aliases = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["kimi-coding"] = "kimi",
+        ["kimi-code"] = "kimi",
+        ["zhipu"] = "glm",
+        ["bigmodel"] = "glm",
+        ["zai"] = "glm",
+        ["open-code"] = "opencode",
+        ["opencode-go"] = "opencode",
+    };
+
     public static ParsedArgs Parse(string[] args)
     {
-        SubcommandKind subcommand = SubcommandKind.All;
-        string? unknownSubcommand = null;
-        string? tokenOverride = null;
-        bool showHelp = false;
-        bool showVersion = false;
-        bool selfTest = false;
+        var selected = new List<string>();
+        string? token = null;
+        string? region = null;
+        string? baseUrl = null;
+        string? error = null;
+        var showHelp = false;
+        var showVersion = false;
+        var selfTest = false;
 
-        for (int i = 0; i < args.Length; i++)
+        for (var i = 0; i < args.Length; i++)
         {
-            var a = args[i];
-            if (a == "--help" || a == "-h")
+            var arg = args[i];
+
+            if (TryFlag(args, arg, "--token", ref i, out var value, ref error)) { token = value; continue; }
+            if (TryFlag(args, arg, "--region", ref i, out value, ref error)) { region = value; continue; }
+            if (TryFlag(args, arg, "--base-url", ref i, out value, ref error)) { baseUrl = value; continue; }
+
+            switch (arg)
             {
-                showHelp = true;
+                case "--help" or "-h" or "-?":
+                    showHelp = true;
+                    continue;
+                case "--version" or "-v" or "-V":
+                    showVersion = true;
+                    continue;
+                case "--self-test":
+                    selfTest = true;
+                    continue;
+            }
+
+            if (arg.StartsWith('-'))
+            {
+                error ??= $"未知选项: {arg}";
                 continue;
             }
-            if (a == "--version" || a == "-v")
+
+            if (arg.Equals("all", StringComparison.OrdinalIgnoreCase))
             {
-                showVersion = true;
+                selected.Clear();
                 continue;
             }
-            if (a == "--self-test")
-            {
-                selfTest = true;
-                continue;
-            }
-            if (a == "--token")
-            {
-                if (i + 1 >= args.Length)
-                {
-                    tokenOverride = string.Empty;
-                }
-                else
-                {
-                    tokenOverride = args[i + 1];
-                    i++;
-                }
-                continue;
-            }
-            if (a.StartsWith("--token=", StringComparison.Ordinal))
-            {
-                tokenOverride = a.Substring("--token=".Length);
-                continue;
-            }
-            switch (a)
-            {
-                case "minimax": subcommand = SubcommandKind.Minimax; break;
-                case "deepseek": subcommand = SubcommandKind.DeepSeek; break;
-                case "glm": subcommand = SubcommandKind.Glm; break;
-                case "all": subcommand = SubcommandKind.All; break;
-                default: unknownSubcommand ??= a; break;
-            }
+
+            selected.Add(Aliases.TryGetValue(arg, out var alias) ? alias : arg.ToLowerInvariant());
         }
 
-        var exeDir = AppContext.BaseDirectory;
-        var configResult = ConfigLoader.Load(exeDir);
-
-        if (!showHelp && !showVersion && !selfTest && configResult.Error is not null)
+        var unique = new List<string>();
+        foreach (var name in selected)
         {
-            Console.Error.WriteLine($"错误: {configResult.Error}");
-            if (!string.IsNullOrEmpty(configResult.Detail))
-            {
-                Console.Error.WriteLine(configResult.Detail);
-            }
-            Environment.Exit(ExitCode.ConfigError);
+            if (!unique.Contains(name, StringComparer.OrdinalIgnoreCase)) unique.Add(name);
         }
 
         return new ParsedArgs
         {
-            Subcommand = subcommand,
-            UnknownSubcommand = unknownSubcommand,
-            TokenOverride = string.IsNullOrWhiteSpace(tokenOverride) ? null : tokenOverride.Trim(),
-            ConfigTokens = configResult.Tokens,
+            Selected = unique,
+            TokenOverride = string.IsNullOrWhiteSpace(token) ? null : token.Trim(),
+            Region = string.IsNullOrWhiteSpace(region) ? null : region.Trim(),
+            BaseUrl = string.IsNullOrWhiteSpace(baseUrl) ? null : baseUrl.Trim(),
+            Error = error,
             ShowHelp = showHelp,
             ShowVersion = showVersion,
             SelfTest = selfTest,
         };
+    }
+
+    private static bool TryFlag(string[] args, string arg, string name, ref int index, out string? value, ref string? error)
+    {
+        value = null;
+
+        if (arg.StartsWith(name + "=", StringComparison.Ordinal))
+        {
+            value = arg[(name.Length + 1)..];
+            return true;
+        }
+
+        if (arg != name) return false;
+
+        if (index + 1 >= args.Length)
+        {
+            error ??= $"{name} 缺少取值";
+            return true;
+        }
+
+        value = args[++index];
+        return true;
     }
 }
 
@@ -255,31 +277,45 @@ internal static class Usage
 {
     public static string Get() =>
         """
-        aiusage — 统一查询 AI 平台的 token plan / 余额
+        aiusage — 统一查询 AI 平台的 API 余额 / Coding Plan 套餐用量
 
         用法:
-          aiusage                        等价 all
-          aiusage all                    并行查询所有已配置的 provider
-          aiusage minimax                只查询 minimax
-          aiusage deepseek               只查询 deepseek
-          aiusage glm                    只查询 GLM Token Plan（智谱 BigModel）
-          aiusage <provider> --token X   CLI 覆盖 token（all 模式不支持）
+          aiusage                      等价 all：并行查询所有已配置的 provider
+          aiusage all                  同上
+          aiusage kimi                 只查询 Kimi For Coding（5h / 周 / 月度总额度）
+          aiusage glm                  只查询 GLM Coding Plan（智谱 BigModel / z.ai）
+          aiusage minimax              只查询 MiniMax Coding Plan
+          aiusage opencode             只查询 OpenCode Go
+          aiusage codex                只查询 Codex（ChatGPT 订阅）
+          aiusage deepseek             只查询 DeepSeek 余额
+          aiusage moonshot             只查询 Moonshot / Kimi 开放平台余额
+          aiusage openrouter           只查询 OpenRouter 余额
+          aiusage siliconflow          只查询 SiliconFlow 余额
+          aiusage zenmux               只查询 ZenMux 余额
+          aiusage kimi --token X       用命令行 token 覆盖配置（仅单个 provider）
 
         选项:
-          --token <value>     覆盖 config.json 中的 token（仅单 provider 子命令）
-          --token=<value>     同上，等号形式
-          --help, -h          显示本帮助
-          --version, -v       显示版本
-          --self-test         运行 GLM 解析逻辑离线自检
+          --token <value>      覆盖 config.json 中的 token（仅单个 provider）
+          --region <cn|global> 覆盖站点区域（cn 默认；global 走国际站）
+          --base-url <url>     覆盖端点基址（代理 / 兼容网关）
+          --help, -h           显示本帮助
+          --version, -v        显示版本
+          --self-test          运行解析逻辑离线自检
 
         配置文件: <exe-dir>/config.json
           {
             "providers": {
-              "minimax":  { "token": "..." },
-              "deepseek": { "token": "..." },
-              "glm":      { "token": "..." }
+              "kimi":     { "token": "sk-kimi-...",  "region": "cn" },
+              "glm":      { "token": "...",           "region": "cn" },
+              "minimax":  { "token": "...",           "region": "cn" },
+              "deepseek": { "token": "sk-..." },
+              "codex":    { "token": "<oauth>",       "accountId": "..." }
             }
           }
+
+          未配置 token 的 provider 在 all 模式下自动跳过。
+          codex 无需 API key：未配置时自动读取 Codex CLI 的 ChatGPT 登录态
+          （%USERPROFILE%\\.codex\\auth.json），只需先运行 codex login。
 
         退出码:
           0  全部成功
@@ -290,13 +326,13 @@ internal static class Usage
 
     public static string GetVersion()
     {
-        var asm = typeof(Program).Assembly;
-        var info = asm.GetCustomAttribute<AssemblyInformationalVersionAttribute>();
+        var assembly = typeof(Program).Assembly;
+        var info = assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>();
         if (info is not null && !string.IsNullOrWhiteSpace(info.InformationalVersion))
         {
             return info.InformationalVersion;
         }
-        var v = asm.GetName().Version;
-        return v is null ? "1.0.0" : $"{v.Major}.{v.Minor}.{v.Build}";
+        var version = assembly.GetName().Version;
+        return version is null ? "1.1.0" : $"{version.Major}.{version.Minor}.{version.Build}";
     }
 }

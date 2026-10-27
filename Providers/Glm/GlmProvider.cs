@@ -1,192 +1,155 @@
-using System.Net.Http.Headers;
 using System.Text.Json;
-using System.Text.Json.Serialization;
-using TokenUsage.Errors;
+using TokenUsage.Config;
+using TokenUsage.Providers.Common;
 
 namespace TokenUsage.Providers.Glm;
 
 internal sealed class GlmProvider : IProvider
 {
     public string Name => "glm";
-    public string DisplayTitle => "GLM Token Plan 用量";
+    public string DisplayTitle => "GLM Coding Plan 用量";
 
-    // 智谱 BigModel / Z.AI 配额查询端点
-    // （与 dsh-glm-usage lib/index.js、pi-glm-quota pure.ts、opencodex quota.ts 保持一致）
-    private const string HostCn = "https://open.bigmodel.cn";
-    private const string HostGlobal = "https://api.z.ai";
-    private const string MonitorPath = "/api/monitor/usage/quota/limit";
+    private const string AuthHint =
+        "token 无效或已过期，请登录 https://open.bigmodel.cn 或 https://z.ai 重置 API Key";
 
-    private static readonly HttpClient SharedClient = CreateClient();
+    private const string Path = "/api/monitor/usage/quota/limit";
 
-    private static HttpClient CreateClient()
-    {
-        var client = new HttpClient
-        {
-            Timeout = TimeSpan.FromSeconds(15)
-        };
-        client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
-        client.DefaultRequestHeaders.AcceptLanguage.Add(new StringWithQualityHeaderValue("en-US"));
-        client.DefaultRequestHeaders.AcceptLanguage.Add(new StringWithQualityHeaderValue("en"));
-        return client;
-    }
-
-    public async Task<string> FetchAndRenderAsync(string token, CancellationToken cancellationToken)
+    public async Task<string> FetchAndRenderAsync(ProviderConfig config, CancellationToken cancellationToken)
     {
         // 智谱两种鉴权方式都被不同客户端使用过：
-        //   - opencodex / z.ai 官方: `Authorization: Bearer <key>`
+        //   - z.ai 官方 / opencodex: Authorization: Bearer <key>
         //   - dsh-glm-usage / pi-glm-quota: 直接用 key 作值（无 Bearer 前缀）
-        // 两条路径都先尝试，第一个非 401/403 的视为成功。
-        var result = await TryProbeAsync(token, bearer: true, cancellationToken)
-            ?? await TryProbeAsync(token, bearer: false, cancellationToken);
-
-        if (result is null)
+        // 逐个组合尝试，第一个 2xx 的响应生效。
+        var endpoints = BuildEndpoints(config);
+        var headers = new Dictionary<string, string>
         {
-            // TryProbeAsync 在失败时已抛 ProviderException；如果静默走到 null，说明两次都不可达
-            throw new ProviderException(ProviderExceptionKind.Unauthorized, "token 无效或已过期，请登录 https://open.bigmodel.cn 重置 API Key");
-        }
+            ["accept-language"] = "en-US,en",
+        };
 
-        var usage = GlmUsage.Parse(result.Value.Data, result.Value.Host);
-        return GlmRenderer.Render(usage);
+        var (document, _) = await HttpProbe.GetJsonAnyAsync(
+            endpoints,
+            config.Token!,
+            headers,
+            TimeSpan.FromSeconds(15),
+            AuthHint,
+            cancellationToken);
+
+        using (document)
+        {
+            return ReportRenderer.RenderPlan(DisplayTitle, Parse(document.RootElement));
+        }
     }
 
-    private static async Task<(QuotaData Data, string Host)?> TryProbeAsync(
-        string token, bool bearer, CancellationToken cancellationToken)
+    private static IReadOnlyList<Endpoint> BuildEndpoints(ProviderConfig config)
     {
-        var hosts = new[] { HostCn, HostGlobal };
-        Exception? lastError = null;
+        var hosts = new List<string>();
+        if (!string.IsNullOrWhiteSpace(config.BaseUrl))
+        {
+            hosts.Add(config.BaseUrl.Trim().TrimEnd('/'));
+        }
+        else if (config.IsGlobalRegion)
+        {
+            hosts.Add("https://api.z.ai");
+        }
+        else
+        {
+            hosts.Add("https://open.bigmodel.cn");
+            hosts.Add("https://api.z.ai");
+        }
 
+        var endpoints = new List<Endpoint>(hosts.Count * 2);
         foreach (var host in hosts)
         {
-            using var request = new HttpRequestMessage(HttpMethod.Get, host + MonitorPath);
-            var headerValue = bearer ? $"Bearer {token}" : token;
-            request.Headers.TryAddWithoutValidation("Authorization", headerValue);
-
-            HttpResponseMessage response;
-            try
-            {
-                response = await SharedClient.SendAsync(request, cancellationToken);
-            }
-            catch (TaskCanceledException) when (!cancellationToken.IsCancellationRequested)
-            {
-                throw new ProviderException(ProviderExceptionKind.Timeout, "请求超时（15秒）");
-            }
-            catch (HttpRequestException ex)
-            {
-                lastError = ex;
-                continue;
-            }
-
-            var body = await response.Content.ReadAsStringAsync(cancellationToken);
-
-            // 401/403 当前鉴权形式不通过，换一种形式 / 另一个 host 再试
-            if ((int)response.StatusCode is 401 or 403)
-            {
-                response.Dispose();
-                continue;
-            }
-
-            if (!response.IsSuccessStatusCode)
-            {
-                var preview = body.Length > 200 ? body[..200] : body;
-                throw new ProviderException(
-                    ProviderExceptionKind.ApiError,
-                    $"API 返回 {(int)response.StatusCode} {response.ReasonPhrase}：{preview}");
-            }
-
-            QuotaResponse? parsed;
-            try
-            {
-                parsed = JsonSerializer.Deserialize(body, GlmJsonContext.Default.QuotaResponse);
-            }
-            catch (JsonException ex)
-            {
-                lastError = ex;
-                continue;
-            }
-
-            if (parsed is null)
-            {
-                lastError = new InvalidOperationException("响应为空");
-                continue;
-            }
-
-            if (parsed.Success is false)
-            {
-                throw new ProviderException(
-                    ProviderExceptionKind.ApiError,
-                    string.IsNullOrWhiteSpace(parsed.Msg) ? "业务错误" : parsed.Msg!);
-            }
-
-            if (parsed.Data is null)
-            {
-                lastError = new InvalidOperationException("响应缺少 data 字段");
-                continue;
-            }
-
-            return (parsed.Data, host);
+            var url = host.EndsWith(Path, StringComparison.OrdinalIgnoreCase) ? host : host + Path;
+            endpoints.Add(new Endpoint(url, Bearer: false));
+            endpoints.Add(new Endpoint(url, Bearer: true));
         }
-
-        if (lastError is not null)
-        {
-            throw new ProviderException(ProviderExceptionKind.Network, $"网络异常: {lastError.Message}");
-        }
-        return null;
+        return endpoints;
     }
-}
 
-// 服务端的限额条目；兼容 TOKENS_LIMIT（旧协议）和 CREDIT_LIMIT（新积分套餐协议）
-internal sealed class QuotaResponse
-{
-    [JsonPropertyName("success")]
-    public bool? Success { get; set; }
+    /// <summary>
+    /// 窗口按智谱自己的 unit 码分类，避免新增/重排行导致窗口串位：
+    ///   3 = 5 小时滚动窗口，6 = 每周窗口，5 = 每月窗口。
+    /// TOKENS_LIMIT 走 percentage；CREDIT_LIMIT 优先用 currentValue / usage 的精确比例。
+    /// TIME_LIMIT 是 MCP 请求上限，不是套餐窗口，单独标记为明细行。
+    /// </summary>
+    internal static PlanReport Parse(JsonElement root)
+    {
+        if (JsonUtil.Bool(root, "success") is false)
+        {
+            throw new ProviderException(
+                ProviderExceptionKind.ApiError,
+                JsonUtil.Str(root, "msg") ?? "智谱接口返回 success=false");
+        }
 
-    [JsonPropertyName("code")]
-    public long? Code { get; set; }
+        var data = JsonUtil.Prop(root, "data")
+            ?? throw new ProviderException(ProviderExceptionKind.ApiError, "响应缺少 data");
 
-    [JsonPropertyName("msg")]
-    public string? Msg { get; set; }
+        var windows = new List<PlanWindow>();
 
-    [JsonPropertyName("data")]
-    public QuotaData? Data { get; set; }
-}
+        foreach (var row in JsonUtil.Array(data, "limits"))
+        {
+            var type = (JsonUtil.Str(row, "type") ?? string.Empty).ToUpperInvariant();
+            var resetMs = TimeUtil.ParseInstantMs(JsonUtil.FirstProp(row, "nextResetTime", "next_reset_time"));
 
-internal sealed class QuotaData
-{
-    [JsonPropertyName("level")]
-    public string? Level { get; set; }
+            if (type == "TIME_LIMIT")
+            {
+                var percent = PercentFromRatio(row) ?? ClampPercent(JsonUtil.Num(row, "percentage"));
+                if (percent is null) continue;
+                windows.Add(new PlanWindow
+                {
+                    Label = "MCP 月请求（Web Search / Web Reader / Zread）",
+                    Percent = percent,
+                    ResetMs = resetMs,
+                    IsDetail = true,
+                });
+                continue;
+            }
 
-    [JsonPropertyName("limits")]
-    public List<QuotaLimit> Limits { get; set; } = new();
-}
+            if (type != "TOKENS_LIMIT" && type != "CREDIT_LIMIT") continue;
 
-internal sealed class QuotaLimit
-{
-    [JsonPropertyName("type")]
-    public string? Type { get; set; }
+            var label = (JsonUtil.Long(row, "unit")) switch
+            {
+                3 => "5h 滚动窗口",
+                6 => "周窗口",
+                5 => "月窗口",
+                _ => null,
+            };
+            if (label is null) continue;
 
-    [JsonPropertyName("unit")]
-    public long? Unit { get; set; }
+            var rowPercent = type == "CREDIT_LIMIT"
+                ? PercentFromRatio(row) ?? ClampPercent(JsonUtil.Num(row, "percentage"))
+                : ClampPercent(JsonUtil.Num(row, "percentage")) ?? PercentFromRatio(row);
+            if (rowPercent is null) continue;
 
-    [JsonPropertyName("number")]
-    public long? Number { get; set; }
+            windows.Add(new PlanWindow
+            {
+                Label = label,
+                Percent = rowPercent,
+                Used = JsonUtil.Num(row, "currentValue"),
+                Limit = JsonUtil.Num(row, "usage"),
+                ResetMs = resetMs,
+            });
+        }
 
-    [JsonPropertyName("usage")]
-    public double? Usage { get; set; }
+        return new PlanReport
+        {
+            PlanName = JsonUtil.Str(data, "level"),
+            Windows = windows,
+            Note = windows.Count == 0
+                ? "未返回可识别的套餐窗口（TOKENS_LIMIT / CREDIT_LIMIT 的 unit 3/6/5）"
+                : null,
+        };
+    }
 
-    [JsonPropertyName("currentValue")]
-    public double? CurrentValue { get; set; }
+    private static double? PercentFromRatio(JsonElement row)
+    {
+        var used = JsonUtil.Num(row, "currentValue");
+        var limit = JsonUtil.Num(row, "usage");
+        if (used is null || limit is null || limit <= 0) return null;
+        return Math.Clamp(used.Value / limit.Value * 100d, 0, 100);
+    }
 
-    [JsonPropertyName("remaining")]
-    public double? Remaining { get; set; }
-
-    [JsonPropertyName("percentage")]
-    public double? Percentage { get; set; }
-
-    [JsonPropertyName("nextResetTime")]
-    public long? NextResetTime { get; set; }
-}
-
-[JsonSerializable(typeof(QuotaResponse))]
-internal partial class GlmJsonContext : JsonSerializerContext
-{
+    private static double? ClampPercent(double? value) =>
+        value is null ? null : Math.Clamp(value.Value, 0, 100);
 }

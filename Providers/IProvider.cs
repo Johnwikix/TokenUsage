@@ -1,4 +1,4 @@
-using TokenUsage.Errors;
+using TokenUsage.Config;
 
 namespace TokenUsage.Providers;
 
@@ -6,7 +6,15 @@ internal interface IProvider
 {
     string Name { get; }
     string DisplayTitle { get; }
-    Task<string> FetchAndRenderAsync(string token, CancellationToken cancellationToken);
+    Task<string> FetchAndRenderAsync(ProviderConfig config, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// 从本机已有的登录态补全凭证（例如 Codex CLI 的 auth.json）。
+    /// 默认什么都不做；config.json 里显式配置的 token 优先。
+    /// </summary>
+    void ApplyAmbientCredentials(ProviderConfig config)
+    {
+    }
 }
 
 internal enum ProviderExceptionKind
@@ -25,23 +33,4 @@ internal sealed class ProviderException : Exception
     {
         Kind = kind;
     }
-}
-
-internal static class ProviderRegistry
-{
-    private static readonly IProvider[] All = new IProvider[]
-    {
-        new Minimax.MinimaxProvider(),
-        new DeepSeek.DeepSeekProvider(),
-        new Glm.GlmProvider(),
-    };
-
-    private static readonly Dictionary<string, IProvider> ByName =
-        All.ToDictionary(p => p.Name, StringComparer.OrdinalIgnoreCase);
-
-    public static IProvider? TryGet(string name) =>
-        ByName.TryGetValue(name, out var p) ? p : null;
-
-    public static IReadOnlyList<string> KnownNames() =>
-        All.Select(p => p.Name).ToArray();
 }

@@ -1,13 +1,40 @@
 {
   "providers": {
+    "kimi": {
+      "token": "PUT-YOUR-KIMI-CODE-KEY-HERE",
+      "region": "cn"
+    },
+    "glm": {
+      "token": "PUT-YOUR-GLM-API-KEY-HERE",
+      "region": "cn"
+    },
     "minimax": {
-      "token": "PUT-YOUR-MiniMax-API-KEY-HERE"
+      "token": "PUT-YOUR-MiniMax-API-KEY-HERE",
+      "region": "cn"
+    },
+    "opencode": {
+      "token": "PUT-YOUR-OPENCODE-API-KEY-HERE"
+    },
+    "codex": {
+      "token": "PUT-YOUR-CODEX-OAUTH-ACCESS-TOKEN-HERE",
+      "accountId": ""
     },
     "deepseek": {
       "token": "PUT-YOUR-DeepSeek-API-KEY-HERE"
     },
-    "glm": {
-      "token": "PUT-YOUR-GLM-API-KEY-HERE"
+    "moonshot": {
+      "token": "PUT-YOUR-MOONSHOT-API-KEY-HERE",
+      "region": "cn"
+    },
+    "openrouter": {
+      "token": "PUT-YOUR-OPENROUTER-API-KEY-HERE"
+    },
+    "siliconflow": {
+      "token": "PUT-YOUR-SILICONFLOW-API-KEY-HERE",
+      "region": "cn"
+    },
+    "zenmux": {
+      "token": "PUT-YOUR-ZENMUX-API-KEY-HERE"
     }
   }
 }
